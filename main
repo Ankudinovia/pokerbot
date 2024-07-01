@@ -1,0 +1,1249 @@
+
+from collections import deque
+import random
+import tk
+import gym
+from gym import spaces
+import numpy as np
+import numpy as np
+import random
+from pypokerengine.utils.card_utils import gen_cards, estimate_hole_card_win_rate
+from pypokerengine.api.game import setup_config, start_poker
+from pypokerengine.players import BasePokerPlayer
+import math
+
+# Константы
+CARD_VALUES = {"2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10, "Jack": 11, "Queen": 12, "King": 13, "Ace": 14}
+SUIT_VALUES = {"Clubs": 1, "Diamonds": 2, "Hearts": 3, "Spades": 4}
+
+STAGE_ENCODING = {
+    "Preflop": 0,
+    "Flop": 1,
+    "Turn": 2,
+    "River": 3
+}
+
+
+
+
+class PokerGUI:
+
+    def __init__(self, master, game):
+        self.master = master
+        self.game = game
+        master.title("Poker Game")
+        self.create_widgets()
+
+
+
+    def update_game_state(self, game_state):
+        """Обновляет интерфейс с текущим состоянием игры."""
+        self.label_player_hand.config(text=f"Player Hand: {game_state['player_hand']}")
+        self.label_community_cards.config(text=f"Community Cards: {game_state['community_cards']}")
+        self.label_player_stack.config(text=f"Player Stack: {game_state['player_stack']}")
+
+    def create_widgets(self):
+        # Кнопки действий игрока
+        self.btn_fold = tk.Button(self.master, text="Fold", command=self.fold)
+        self.btn_fold.pack(side=tk.LEFT)
+
+        self.btn_call = tk.Button(self.master, text="Call", command=self.call)
+        self.btn_call.pack(side=tk.LEFT)
+
+        self.btn_raise = tk.Button(self.master, text="Raise", command=self.raise_bet)
+        self.btn_raise.pack(side=tk.LEFT)
+
+        # Метки для отображения карт и стека
+        self.label_player_hand = tk.Label(self.master, text="Player Hand: ")
+        self.label_player_hand.pack()
+
+        self.label_community_cards = tk.Label(self.master, text="Community Cards: ")
+        self.label_community_cards.pack()
+
+        self.label_player_stack = tk.Label(self.master, text="Player Stack: ")
+        self.label_player_stack.pack()
+
+        # Дополнительные элементы GUI, такие как поля ввода, можно добавить здесь
+
+
+
+    # Дополнительные методы для обновления интерфейса и взаимодействия с игровой логикой
+
+
+class PokerHandEvaluator:
+    RANKS = "23456789TJQKA"
+    SUITS = "CDHS"
+
+    @staticmethod
+    def evaluate_hand(cards):
+        # Преобразование значений карт в формат, используемый в RANKS
+        hand_ranks = [PokerHandEvaluator.convert_rank(card.value) for card in cards]
+        hand_suits = [card.suit for card in cards]  # Извлечение мастей карт
+
+        rank_counts = PokerHandEvaluator._rank_counts(hand_ranks)
+        is_flush = PokerHandEvaluator._is_flush(hand_suits)
+        is_straight = PokerHandEvaluator._is_straight(hand_ranks)
+        rank_counts_sorted = sorted(rank_counts.items(), key=lambda x: (-x[1], -PokerHandEvaluator.RANKS.index(x[0])))
+
+        if is_flush and is_straight:
+            if 'A' in hand_ranks and 'T' in hand_ranks:  # Роял-флеш
+                return ('royal_flush', 10)
+            return ('straight_flush', 9)
+
+        if rank_counts_sorted and rank_counts_sorted[0][1] == 4:
+            return ('four_of_a_kind', 8)
+
+        if len(rank_counts_sorted) > 1 and rank_counts_sorted[0][1] == 3 and rank_counts_sorted[1][1] == 2:
+            return ('full_house', 7)
+
+        if is_flush:
+            return ('flush', 6)
+
+        if is_straight:
+            return ('straight', 5)
+
+        if rank_counts_sorted and rank_counts_sorted[0][1] == 3:
+            return ('three_of_a_kind', 4)
+
+        if len(rank_counts_sorted) > 1 and rank_counts_sorted[0][1] == 2 and rank_counts_sorted[1][1] == 2:
+            return ('two_pair', 3)
+
+        if rank_counts_sorted and rank_counts_sorted[0][1] == 2:
+            return ('one_pair', 2)
+
+        return ('high_card', 1)
+
+    @staticmethod
+    def convert_rank(rank):
+        """Конвертирует полные названия карт в однобуквенные обозначения."""
+        conversion = {"10": "T", "Jack": "J", "Queen": "Q", "King": "K", "Ace": "A"}
+        return conversion.get(rank, rank)  # Возвращает преобразованное значение или исходное
+
+    @staticmethod
+    def _rank_counts(hand_ranks):
+        """Считает количество каждой карты в руке."""
+        rank_counts = {}
+        for rank in hand_ranks:
+            rank_counts[rank] = rank_counts.get(rank, 0) + 1
+        return rank_counts
+
+    @staticmethod
+    def _is_flush(suits):
+        """Проверяет, является ли рука флешем."""
+        return len(set(suits)) == 1
+
+    @staticmethod
+    def _is_straight(ranks):
+        """Проверяет, есть ли в руке стрит."""
+        rank_indices = [PokerHandEvaluator.RANKS.index(rank) for rank in ranks]
+        rank_indices.sort()
+
+        # Проверка обычного стрита
+        if all(rank_indices[i + 1] - rank_indices[i] == 1 for i in range(len(rank_indices) - 1)):
+            return True
+
+        # Проверка стрита с тузом как самой маленькой картой
+        if rank_indices[-1] == 12 and rank_indices[0] == 0:
+            return all(rank_indices[i + 1] - rank_indices[i] == 1 for i in range(len(rank_indices) - 2))
+
+        return False
+    def rank_hand(hand):
+        """Присваивает каждой руке числовое значение для сравнения."""
+        value_dict = {'2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9, 'T': 10, 'J': 11, 'Q': 12, 'K': 13, 'A': 14}
+        hand = sorted(hand, key=lambda x: value_dict[x[0]], reverse=True)
+        return [value_dict[card[0]] for card in hand]
+
+class Card:
+    def __init__(self, suit, value):
+        self.suit = suit
+        self.value = value
+
+    def __repr__(self):
+        value_conversion = {"10": "T", "Jack": "J", "Queen": "Q", "King": "K", "Ace": "A"}
+        suit_conversion = {"Clubs": "C", "Diamonds": "D", "Hearts": "H", "Spades": "S"}
+        value_str = value_conversion.get(self.value, self.value)  # Получение символа для ранга
+        suit_str = suit_conversion.get(self.suit)  # Получение символа для масти
+        return f"{suit_str}{value_str}"  # Возвращаем строку в формате 'sA', 'hT' и т.д.
+
+    def __lt__(self, other):
+        return CARD_VALUES[self.value] < CARD_VALUES[other.value]
+
+class Deck:
+    def __init__(self):
+        self.cards = [Card(suit, value) for suit in SUIT_VALUES for value in CARD_VALUES]
+        random.shuffle(self.cards)
+
+    def deal_card(self):
+        return self.cards.pop()
+
+class Player:
+    def __init__(self, stack_size, name="Player"):
+        self.stack = stack_size
+        self.hand = []
+        self.name = name
+        self.current_bet = 0
+        self.has_folded = False
+        self.has_acted = False  # Добавляем этот атрибут
+        
+    def bet(self, amount):
+        actual_bet = min(amount, self.stack)
+        self.stack -= actual_bet
+        self.current_bet += actual_bet
+        return actual_bet
+
+    def deal_hand(self, deck):
+        self.hand = [deck.deal_card() for _ in range(2)]
+
+    def __repr__(self):
+        return f"{self.name}: {self.hand}, Стек: {self.stack}"
+
+class PokerGame:
+    ACTION_FOLD = 0
+    ACTION_CALL = 1
+    ACTION_CHECK = 2
+    ACTION_RAISE_5 = 3
+    ACTION_RAISE_15 = 4
+    ACTION_RAISE_35 = 5
+    ACTION_RAISE_50 = 6
+    ACTION_RAISE_75 = 7
+    ACTION_RAISE_100 = 8
+
+    def __init__(self, starting_stack=25):
+        self.players = [Player(starting_stack, "Игрок 1"), Player(starting_stack, "Игрок 2")]
+        self.deck = Deck()
+        self.community_cards = []
+        self.pot = 0
+        self.total_pot = 0
+        self.current_bet = 0  # Убедимся, что этот атрибут инициализирован
+        self.current_stage = "Preflop"
+        self.small_blind = 1
+        self.big_blind = 2
+        self.active_player = 0
+        self.dealer_position = 0
+        self.last_raiser = None
+        self.starting_stack = starting_stack  # Добавляем это
+    # ... предыдущие методы ...
+
+    def estimate_win_rate(self, nb_simulation=100):
+        # Проверка, если игра завершена или только один игрок остался
+        active_players = [p for p in self.players if not p.has_folded]
+        if len(active_players) <= 1:
+            # Если в игре остался только один активный игрок, вероятность выигрыша равна 1
+            return 1.0
+
+        # Преобразование карт из формата объекта Card в строки, пригодные для pypokerengine
+        community_cards_str = [card.__repr__() for card in self.community_cards]
+        hole_cards_str = [card.__repr__() for card in self.players[self.active_player].hand]
+        
+        # Преобразование строк карт в формат, ожидаемый pypokerengine
+        community_cards_py = gen_cards(community_cards_str)
+        hole_cards_py = gen_cards(hole_cards_str)
+        
+        try:
+            # Оценка вероятности выигрыша с использованием библиотеки pypokerengine
+            win_rate = estimate_hole_card_win_rate(
+                nb_simulation=nb_simulation,
+                nb_player=len(active_players),
+                hole_card=hole_cards_py,
+                community_card=community_cards_py
+            )
+        except Exception as e:
+            # Обработка возможных исключений при оценке вероятности выигрыша
+            print(f"Ошибка при оценке вероятности выигрыша: {e}")
+            win_rate = 0.0  # Возвращаем 0 в случае ошибки
+
+        return win_rate
+
+    def reset_game(self):
+        """Перезапускает игру с начальными стеками и обнуляет общий пот."""
+        self.total_pot = 0
+        self.pot = 0
+        for player in self.players:
+            player.stack = self.starting_stack  # Установить начальный стек для каждого игрока
+            player.current_bet = 0
+            player.has_folded = False
+            player.has_acted = False
+            player.deal_hand(self.deck)  # Раздать новую руку каждому игроку
+
+        # Установить начальные значения для блайндов
+        self.players[self.get_small_blind_position()].bet(self.small_blind)
+        self.players[self.get_big_blind_position()].bet(self.big_blind)
+
+        self.current_stage = "Preflop"
+        self.dealer_position = (self.dealer_position + 1) % len(self.players)  # Передвигаем дилера
+        self.active_player = self.get_small_blind_position()  # Начать с малого блайнда
+
+
+    def print_game_info(self, player_action, player_name, player_stack, player_current_bet, pot):
+        print("\nОбщие карты на столе: " + ", ".join(str(card) for card in self.community_cards))
+        for player in self.players:
+            print(f"{player.name} - Рука: {' '.join(str(card) for card in player.hand)}, Стек: {player.stack}, Текущая ставка: {player.current_bet}")
+        print(f"Общий пот: {self.total_pot + self.pot}, Текущая ставка игры: {self.current_bet}, Этап игры: {self.current_stage}")
+        print(f"Ходит {player_name}")
+        print(f"Действие: {player_action}, Игрок: {player_name}, Стек: {player_stack}, Текущая ставка: {player_current_bet}, Общий пот: {pot}\n")
+
+
+    def all_players_acted(self):
+        active_players = [p for p in self.players if not p.has_folded]
+        return all(p.has_acted for p in active_players)
+
+    def print_game_state(self):
+        self.print_community_cards()
+        for player in self.players:
+            print(f"{player.name} - Рука: {' '.join(str(card) for card in player.hand)}, Стек: {player.stack}, Текущая ставка: {player.current_bet}")
+        # Суммируем total_pot и pot для отображения общего пота на столе
+        print(f"Общий пот: {self.total_pot + self.pot}, Текущая ставка игры: {self.current_bet}, Этап игры: {self.current_stage}")
+
+    def get_available_actions(self, player):
+        actions = []
+        is_small_blind = self.active_player == self.get_small_blind_position()
+        is_big_blind = self.active_player == self.get_big_blind_position()
+        has_raise_occurred = self.last_raiser is not None and self.last_raiser != player
+
+        if is_small_blind:
+            actions.extend(["fold", "call"])
+            if not has_raise_occurred or player.current_bet < self.current_bet:
+                actions.extend(self.get_raise_options(player))
+        elif is_big_blind and self.current_bet == self.big_blind:
+            actions.extend(["check"])
+            actions.extend(self.get_raise_options(player))
+        elif has_raise_occurred:
+            actions.extend(["fold", "call"])
+            if player.current_bet < self.current_bet:
+                actions.extend(self.get_raise_options(player))
+        elif self.current_bet == player.current_bet:
+            actions.extend(["check"])
+            actions.extend(self.get_raise_options(player))
+        else:
+            actions.append("call")
+
+        return actions
+
+    def get_raise_options(self, player):
+        stack = player.stack
+        return ["raise_5", "raise_15", "raise_35", "raise_50", "raise_75", "raise_100"] if stack > self.big_blind else []
+
+    def get_raise_amounts(self, player):
+        stack = player.stack
+        return [stack * percent for percent in [0.05, 0.15, 0.35, 0.50, 0.75, 1.00]]
+
+
+    def can_check(self, player):
+        # Игрок может делать чек, если текущая ставка равна его ставке
+        # или если это большой блайнд и его ставка не была перебита
+        is_big_blind = self.active_player == self.get_big_blind_position()
+        can_big_blind_check = is_big_blind and self.current_bet == self.big_blind and self.last_raiser != player
+
+        return self.current_bet == player.current_bet or can_big_blind_check
+
+    def can_call(self, player):
+        # Игрок может делать call, если текущая ставка больше его ставки
+        # Или если игрок на малом блайнде и должен доплатить до размера большого блайнда
+        is_small_blind = self.active_player == self.get_small_blind_position()
+        is_small_blind_needs_to_call = is_small_blind and player.current_bet == self.small_blind and self.current_bet == self.big_blind
+        return self.current_bet > player.current_bet or is_small_blind_needs_to_call
+
+
+    def can_raise(self, player):
+        # Raise is always an option unless the player has already raised
+        return player.current_bet < self.current_bet or \
+               self.current_bet == 0
+
+    def can_fold(self, player):
+        # Player can fold if there was a raise before
+        return self.current_bet > player.current_bet and \
+               self.current_bet != 0
+
+    def get_small_blind_position(self):
+        return (self.dealer_position + 1) % len(self.players)
+
+    def is_player_small_blind(self, player_id):
+        return player_id == self.get_small_blind_position()
+
+    def is_player_big_blind(self, player_id):
+        return player_id == (self.get_small_blind_position() + 1) % len(self.players)
+
+    def convert_raise_action_to_amount(self, action, player):
+        raise_mapping = {
+            'raise_5': 0.05 * player.stack,
+            'raise_15': 0.15 * player.stack,
+            'raise_35': 0.35 * player.stack,
+            'raise_50': 0.5 * player.stack,
+            'raise_75': 0.75 * player.stack,
+            'raise_100': 1 * player.stack
+            # Добавьте здесь остальные действия...
+        }
+        return raise_mapping.get(action, 0)
+
+
+    def player_action(self, action_str, amount=0):
+        player = self.players[self.active_player]
+        available_actions = self.get_available_actions(player)
+
+        # Проверяем, является ли действие допустимым
+        if action_str not in available_actions:
+            raise ValueError(f"Недопустимое действие: {action_str}. Доступные действия: {', '.join(available_actions)}")
+
+        # Обрабатываем различные действия
+        if action_str == "fold":
+            player.has_folded = True
+            self.pot -= player.current_bet  # Возвращаем ставку игрока в общий пот, если он пасует
+        elif action_str == "call":
+            self.handle_call(player)
+        elif action_str == "check":
+            self.handle_check(player)
+        elif action_str.startswith("raise"):
+            raise_amount = self.convert_raise_action_to_amount(action_str, player)
+            self.handle_raise(player, raise_amount)
+
+        player.has_acted = True  # Отмечаем, что игрок совершил действие
+
+        self.print_game_info(action_str, player.name, player.stack, player.current_bet, self.pot)
+
+        # Проверяем, завершили ли все игроки ход, чтобы обновить игру
+        if self.all_players_acted():
+            self.update_game_after_action()
+        else:
+            self.switch_active_player()  # Переключаемся на следующего игрока
+
+    def handle_call(self, player):
+        amount_to_call = self.current_bet - player.current_bet
+        actual_call = player.bet(amount_to_call)
+        self.pot += actual_call
+
+    def handle_check(self, player):
+        if not self.can_check(player):
+            raise ValueError(f"{player.name} не может делать check.")
+
+    def handle_raise(self, player, raise_amount):
+        actual_raise = player.bet(raise_amount)
+        self.pot += actual_raise
+        self.current_bet = player.current_bet
+        self.last_raiser = player
+        self.reset_other_players_actions(player)
+
+    def handle_all_in(self, player):
+        all_in_amount = player.stack
+        player.current_bet += all_in_amount
+        self.pot += all_in_amount
+        player.stack = 0
+        player.is_all_in = True  # Помечаем, что игрок пошел ва-банк
+        self.check_for_all_in_scenarios()  # Проверяем сценарии, когда игрок пошел ва-банк
+
+    def check_for_all_in_scenarios(self):
+        # Проверяем, нужно ли завершить раунд, если все оставшиеся игроки пошли ва-банк
+        if all(player.is_all_in for player in self.players if not player.has_folded):
+            self.finish_round()
+
+    def convert_action_to_game_action(self, action_str):
+        action_mapping = {
+            self.ACTION_FOLD: 'fold',
+            self.ACTION_CALL: 'call',
+            self.ACTION_CHECK: 'check',
+            self.ACTION_RAISE_5: 'raise_5',
+            self.ACTION_RAISE_15: 'raise_15',
+            self.ACTION_RAISE_35: 'raise_35',
+            self.ACTION_RAISE_50: 'raise_50',
+            self.ACTION_RAISE_75: 'raise_75',
+            self.ACTION_RAISE_100: 'raise_100'
+        }
+        return action_mapping.get(action_str, 'fold') 
+
+    def update_game_after_action(self):
+        if self.current_stage == "River" or len([p for p in self.players if not p.has_folded]) <= 1:
+            self.finish_round()
+            return
+        if self.should_move_to_next_stage():
+            self.next_stage()
+        else:
+            self.set_first_active_player()
+
+    def call(self, player):
+        amount_to_call = self.current_bet - player.current_bet
+        self.process_player_action(player, "call", amount_to_call)
+
+    def handle_all_in(self, player):
+        amount_to_call = min(self.current_bet - player.current_bet, player.stack)
+        player.stack -= amount_to_call
+        player.current_bet += amount_to_call
+        self.pot += amount_to_call
+        player.has_acted = True
+        # Проверка, если другой игрок может выиграть больше, чем стек ва-банк игрока
+        self.finish_round_if_all_in()
+
+    def finish_round_if_all_in(self):
+        if any(p.stack == 0 for p in self.players):
+            self.finish_round()
+
+    def check(self, player):
+        if not self.can_check(player):
+            raise ValueError(f"{player.name} не может делать check.")
+        self.process_player_action(player, "check", 0)
+
+    def get_big_blind_position(self):
+        # Возвращает позицию игрока, который является большим блайндом
+        return (self.dealer_position + 1) % len(self.players)
+
+    def fold(self, player):
+        player.has_folded = True
+        self.process_player_action(player, "fold", 0)
+
+    def process_player_action(self, player, action_str, amount):
+        if action_str == "fold":
+            player.has_folded = True
+        elif action_str in ["call", "raise"]:
+            self.update_bets(player, amount)
+        elif action_str == "check":
+            pass  # Ничего не делаем, просто переходим к следующему игроку
+
+        player.has_acted = True
+        self.print_game_info(action_str, player.name, player.stack, player.current_bet, self.pot)
+
+        if self.all_players_acted():
+            self.update_game_after_action()
+        else:
+            self.switch_active_player()
+
+
+    def raise_bet(self, player, action_str):
+        raise_amount = self.convert_raise_action_to_amount(action_str, player)
+        if raise_amount > player.stack:
+            raise ValueError(f"{player.name} не может сделать ставку больше своего стека.")
+        self.process_player_action(player, "raise", raise_amount)
+
+
+    def should_move_to_next_stage(self):
+        # Проверяем, сделали ли все активные игроки ход и равны ли их ставки
+        active_players = [p for p in self.players if not p.has_folded]
+        all_acted = all(p.has_acted for p in active_players)
+        all_bets_equal = all(p.current_bet == self.current_bet for p in active_players)
+        
+        # Убедимся, что игра переходит к следующему этапу, если выполнены условия
+        if all_acted and all_bets_equal:
+            return True
+        return False
+
+
+
+    def start_new_round(self):
+        self.deck = Deck()
+        self.community_cards = []
+        self.pot = 0
+        self.total_pot = 0
+        self.current_bet = self.big_blind
+        self.current_stage = "Preflop"
+        
+        # Сброс состояния и руки каждого игрока
+        for player in self.players:
+            player.deal_hand(self.deck)
+            player.current_bet = 0
+            player.has_folded = False
+            player.has_acted = False
+
+        self.dealer_position = (self.dealer_position + 1) % len(self.players)
+        self.active_player = self.get_small_blind_position()
+        
+        small_blind_player = self.active_player
+        big_blind_player = (self.active_player + 1) % len(self.players)
+        
+        self.players[small_blind_player].bet(self.small_blind)
+        self.players[big_blind_player].bet(self.big_blind)
+        
+        self.pot = self.small_blind + self.big_blind
+
+    def next_stage(self):
+        self.current_bet = 0
+        self.total_pot += self.pot
+        self.pot = 0
+        self.reset_player_bets_and_actions()
+
+        stage_order = ["Preflop", "Flop", "Turn", "River", "Showdown"]
+        current_index = stage_order.index(self.current_stage)
+        if current_index < len(stage_order) - 1:
+            self.current_stage = stage_order[current_index + 1]
+
+        if self.current_stage in ["Flop", "Turn", "River"]:
+            self.deal_community_cards(3 if self.current_stage == "Flop" else 1)
+
+        # Начало нового этапа с игрока на малом блайнде
+        self.active_player = self.get_small_blind_position()
+        while self.players[self.active_player].has_folded:
+            self.active_player = (self.active_player + 1) % len(self.players)
+
+
+    def reset_player_actions(self):
+        for player in self.players:
+            player.has_acted = False
+
+    def set_first_active_player_after_dealer(self):
+        self.active_player = (self.dealer_position + 1) % len(self.players)
+        while self.players[self.active_player].has_folded:
+            self.active_player = (self.active_player + 1) % len(self.players)
+
+    def set_first_active_player(self):
+        # Устанавливаем активного игрока на первого не сбросившего карты
+        for player in self.players:
+            if not player.has_folded:
+                self.active_player = self.players.index(player)
+                break
+
+
+    def reset_player_bets_and_actions(self):
+        for player in self.players:
+            player.current_bet = 0
+            player.has_acted = False
+
+
+    def finish_round(self):
+        # Определение победителя раунда (или победителей в случае ничьей)
+        winner = self.determine_winner()
+        if winner:
+            # Обработка случая, когда один из игроков пошел ва-банк
+            amount_won = min(winner.stack, self.total_pot + self.pot)
+            winner.stack += amount_won
+            self.total_pot = 0
+            self.pot -= amount_won
+            print(f"Победитель раунда: {winner.name}, выигрыш: {amount_won}")
+            
+            # Возвращаем остаток стека второму игроку, если он ставил больше
+            if amount_won < self.total_pot + self.pot:
+                loser = [p for p in self.players if p != winner][0]
+                loser.stack += (self.total_pot + self.pot) - amount_won
+
+        else:
+            # Обработка ничьей
+            self.handle_tie()
+
+        # Проверка на возможность начала новой игры
+        if any(player.stack <= 0 for player in self.players):
+            overall_winner = max(self.players, key=lambda p: p.stack)
+            print(f"Общий победитель игры: {overall_winner.name}")
+            if self.prompt_new_game():
+                self.reset_game()
+            else:
+                print("Игра завершена.")
+                return
+        else:
+            self.pot = 0
+            self.total_pot = 0
+            self.start_new_round()
+
+            
+    def handle_tie(self):
+        active_players = [p for p in self.players if not p.has_folded]
+        if len(active_players) > 1:
+            split_pot = (self.total_pot + self.pot) / len(active_players)
+            for player in active_players:
+                player.stack += split_pot
+            print("Раунд закончился ничьей. Пот разделен поровну.")
+        self.pot = 0
+        self.total_pot = 0
+
+
+    def prompt_new_game(self):
+        response = input("Повторить игру? (да/нет): ")
+        return response.lower() in ["да", "yes"]
+
+
+    def deal_community_cards(self, number):
+        for _ in range(number):
+            self.community_cards.append(self.deck.deal_card())
+
+    def print_community_cards(self):
+        print(f"\nОбщие карты на столе: " + ", ".join(str(card) for card in self.community_cards))
+    # Добавить методы для решений игроков и определения победителя
+    # Продолжение класса PokerGame
+
+
+
+
+    def update_total_pot(self):
+        # Метод обновлен для корректного подсчета общего пота
+        self.total_pot += self.pot
+        self.pot = 0
+
+
+    def switch_active_player(self):
+        prev_active_player = self.active_player
+        self.active_player = (self.active_player + 1) % len(self.players)
+
+        while self.players[self.active_player].has_folded or self.players[self.active_player].has_acted:
+            if self.active_player == prev_active_player:
+                # Если мы вернулись к предыдущему активному игроку, это означает, что все игроки сделали свои ходы
+                self.update_game_after_action()
+                return
+            self.active_player = (self.active_player + 1) % len(self.players)
+                
+    def update_bets(self, player, bet_amount):
+        player.stack -= bet_amount
+        player.current_bet += bet_amount
+        self.pot += bet_amount
+
+        if bet_amount > self.current_bet:
+            self.current_bet = bet_amount
+            self.last_raiser = player
+
+        self.reset_other_players_actions(player)
+
+    def reset_other_players_actions(self, active_player):
+        for player in self.players:
+            if player != active_player:
+                player.has_folded = False
+
+    def reset_other_players_actions(self, active_player):
+        for player in self.players:
+            if player != active_player:
+                player.has_acted = False
+
+    @staticmethod
+    def _rank_counts(hand_ranks):
+        """Считает количество каждой карты в руке."""
+        rank_counts = {}
+        for rank in hand_ranks:
+            rank_counts[rank] = rank_counts.get(rank, 0) + 1
+        return rank_counts
+
+
+    def determine_winner(self):
+        """Определяет победителя раунда."""
+        hand1 = self.players[0].hand + self.community_cards
+        hand2 = self.players[1].hand + self.community_cards
+
+        # Оценка рук
+        hand1_rank = PokerHandEvaluator.evaluate_hand(hand1)
+        hand2_rank = PokerHandEvaluator.evaluate_hand(hand2)
+
+        # Сравнение комбинаций
+        if hand1_rank[1] > hand2_rank[1]:
+            return self.players[0]
+        elif hand2_rank[1] > hand1_rank[1]:
+            return self.players[1]
+        else:
+            # Решение ничьи
+            return self.resolve_tie(hand1, hand2)
+    
+    def resolve_tie(self, hand1, hand2):
+        """Решает ничью между двумя руками."""
+        hand1_sorted = self.sort_cards_by_rank(hand1)
+        hand2_sorted = self.sort_cards_by_rank(hand2)
+
+        for card1, card2 in zip(hand1_sorted, hand2_sorted):
+            if card1 > card2:
+                return self.players[0]
+            elif card2 > card1:
+                return self.players[1]
+        return None  # Ничья, если руки равны
+
+    def sort_cards_by_rank(self, cards):
+        """Сортирует карты по старшинству."""
+        return sorted(cards, key=lambda card: (-CARD_VALUES[card.value], -SUIT_VALUES[card.suit]))
+
+
+
+#____________________________________________________________________________________________________________________________________________________________________
+
+
+class PokerEnv(gym.Env):
+    def __init__(self, game, agents):
+        super(PokerEnv, self).__init__()
+        self.game = game
+        self.agents = agents
+        self.action_space = spaces.Discrete(8)  # 'fold', 'call', 'raise', 'check'
+
+        # Размерность вектора состояния
+        # Здесь мы должны учитывать все аспекты игры, которые мы решили включить в состояние.
+        num_player_hand_features = 2  # Пример для количества карт в руке игрока
+        num_community_cards_features = 5  # Пример для количества общих карт
+        num_game_features = 6  # Стек игрока, стек оппонента, ставка оппонента, размер пота, стадия игры, вероятность выигрыша, малый блайнд
+        state_space_dimensions = num_player_hand_features + num_community_cards_features + num_game_features
+
+        # Определение observation_space для вектора состояний
+        # Пределы для каждого измерения должны быть определены в соответствии с возможными значениями каждого аспекта игры.
+        self.observation_space = spaces.Box(
+            low=np.array([0, 0, 0, 0, 1, 0, 0, 5, 20]), 
+            high=np.array([1, 1, 1, 1, 4, 100, 1, 108, 260]), 
+            dtype=np.float32
+        )
+
+
+    def calculate_reward(self, current_state, new_state, previous_stack, current_stack, action, win_rate):
+        # Базовое вознаграждение: разница в размере стека после и до хода
+        reward = current_stack - previous_stack
+
+        # Штрафы и награды на основе выбранного действия и вероятности выигрыша
+        aggressive_actions = [self.game.ACTION_RAISE_5, self.game.ACTION_RAISE_15, self.game.ACTION_RAISE_35, self.game.ACTION_RAISE_50, self.game.ACTION_RAISE_75, self.game.ACTION_RAISE_100]
+        
+        # Если игрок выбрал fold
+        if action == self.game.ACTION_FOLD:
+            if win_rate > 0.75:
+                # Штраф за фолд при высокой вероятности выигрыша
+                reward -= 5 + (win_rate - 0.75) * 10
+            else:
+                # Уменьшение награды за фолд, чтобы обеспечить большую агрессивность
+                reward -= 2
+
+        # Если игрок выбрал агрессивное действие
+        elif action in aggressive_actions:
+            if win_rate > 0.5:
+                # Увеличение награды за агрессивное действие при высокой вероятности выигрыша
+                reward += (win_rate - 0.5) * 5
+            else:
+                # Уменьшение награды за агрессивное действие при низкой вероятности выигрыша
+                reward -= (0.5 - win_rate) * 2
+
+        # Награда за принятие действия call в зависимости от вероятности выигрыша
+        elif action == self.game.ACTION_CALL:
+            CURRENT_BET_INDEX = 2  # Замените X на индекс текущей ставки (opponent_bet_ratio)
+
+            # Используйте индексы в коде
+            expected_value = win_rate * self.game.pot - (1 - win_rate) * current_state[CURRENT_BET_INDEX]
+            reward += expected_value * 0.1
+
+        # Дополнительные штрафы или награды на основе динамики игры
+        total_stack = current_stack + self.game.players[1 - self.game.active_player].stack
+        stack_balance = current_stack / total_stack if total_stack > 0 else 0
+
+        if stack_balance > 0.6:
+            # Награда за доминирование в игре
+            reward += (stack_balance - 0.6) * 2
+        elif stack_balance < 0.4:
+            # Штраф за уязвимое положение
+            reward -= (0.4 - stack_balance) * 4
+
+        # Награда за продвижение игры к следующему этапу или штраф за откат
+        stage_progress = new_state[4] - current_state[4]
+        if stage_progress > 0:
+            reward += 1  # Награда за продвижение игры
+        elif stage_progress < 0:
+            reward -= 2  # Штраф за откат игры
+
+        # Ограничение награды, чтобы избежать чрезмерного влияния на стратегию агента
+        reward = max(min(reward, 10), -10)
+
+        return reward
+
+    def log_actions(self, action, reward, state, next_state):
+        print(f"Действие: {action}, Вознаграждение: {reward}, Состояние: {state}, Следующее состояние: {next_state}")
+
+
+    def adapt_learning_parameters(self, episode):
+        # Снижение exploration_rate с течением времени для смещения от исследования к использованию
+        self.exploration_rate = max(self.min_exploration_rate, self.exploration_rate * self.exploration_decay_rate)
+        threshold = 0.1
+        # Адаптация скорости обучения в зависимости от успеха агента
+        if episode % 100 == 0 and self.average_reward < threshold:
+            self.learning_rate *= 1.1 
+
+    def check_game_over(self, game):
+        if game.current_stage == "Showdown":
+            game.start_new_round()
+            return True
+        return False
+
+    def convert_action_to_string(self, action, available_actions):
+        action_mapping = {
+            self.game.ACTION_FOLD: 'fold',
+            self.game.ACTION_CALL: 'call',
+            self.game.ACTION_CHECK: 'check',
+            self.game.ACTION_RAISE_5: 'raise_5',
+            self.game.ACTION_RAISE_15: 'raise_15',
+            self.game.ACTION_RAISE_35: 'raise_35',
+            self.game.ACTION_RAISE_50: 'raise_50',
+            self.game.ACTION_RAISE_75: 'raise_75',
+            self.game.ACTION_RAISE_100: 'raise_100'
+        }
+        action_str = action_mapping.get(action, None)
+        if action_str and action_str in available_actions:
+            return action_str
+        else:
+            # Логгирование для отладки
+            print(f"Ошибка: Действие {action} ({action_str}) недопустимо. Доступные действия: {available_actions}")
+            raise ValueError(f"Действие {action} ({action_str}) недопустимо. Доступные действия: {available_actions}")
+
+
+
+    def step(self, action):
+        current_player = self.game.players[self.game.active_player]
+        opponent = self.game.players[1 - self.game.active_player]
+        win_rate_before_action = self.game.estimate_win_rate()
+        is_small_blind_before_action = self.game.is_player_small_blind(self.game.active_player)
+
+        # Получение текущего состояния до действия
+        current_state = encode_state(
+            current_player.hand,
+            self.game.community_cards,
+            current_player.stack,
+            opponent.stack,
+            opponent.current_bet,
+            self.game.pot,
+            self.game.current_stage,
+            win_rate_before_action,
+            is_small_blind_before_action,
+            self.game.starting_stack
+        )
+        previous_stack = current_player.stack
+
+        available_actions = self.game.get_available_actions(current_player)
+        
+        # Преобразование числового действия в строку
+        try:
+            action_str = self.convert_action_to_string(action, available_actions)
+        except ValueError as e:
+            print(e)
+            # Выбор альтернативного действия
+            action_str = 'fold' if 'fold' in available_actions else available_actions[0] 
+
+
+        print(f"Текущее действие: {action}")
+        print(f"Доступные действия: {available_actions}")
+        
+        # Выполнение действия
+        self.game.player_action(action_str)
+
+        # Обновление информации после действия
+        win_rate_after_action = self.game.estimate_win_rate()
+        is_small_blind_after_action = self.game.is_player_small_blind(self.game.active_player)
+
+        # Расчет вознаграждения на основе изменения стека и дополнительных параметров
+
+
+        # Обновление состояния после действия
+        new_state = encode_state(
+            current_player.hand,
+            self.game.community_cards,
+            current_player.stack,
+            opponent.stack,
+            opponent.current_bet,
+            self.game.pot,
+            self.game.current_stage,
+            win_rate_after_action,
+            is_small_blind_after_action,
+            self.game.starting_stack
+        )
+
+        # Расчет вознаграждения на основе изменения стека и дополнительных параметров
+        reward = self.calculate_reward(current_state, new_state, previous_stack, current_player.stack, action, win_rate_after_action)
+
+
+
+        # Проверка завершения игры и управление раундами
+        done = self.check_game_over(self.game)
+
+        if not done and self.game.should_move_to_next_stage():
+            self.game.move_to_next_stage()
+
+        # Переключение на следующего игрока
+        self.game.switch_active_player()
+
+        return new_state, reward, done, {}
+
+
+
+
+
+    def reset(self):
+        self.game.start_new_round()
+        current_player = self.game.players[0]  # Если игра начинается с игрока 0
+        opponent = self.game.players[1]
+        win_rate = self.game.estimate_win_rate()  # Получаем вероятность выигрыша
+        is_small_blind = self.game.is_player_small_blind(0)
+        states = encode_state(
+            current_player.hand,
+            self.game.community_cards,
+            current_player.stack,
+            opponent.stack,
+            opponent.current_bet,
+            self.game.pot,
+            self.game.current_stage,
+            win_rate,
+            is_small_blind,
+            self.game.starting_stack
+        )
+        return np.array(states)
+
+    def render(self, mode='human', close=False):
+        # Вывод состояния игры, если требуется
+        print(f"Стек игрока: {self.game.players[0].stack}, Стек противника: {self.game.players[1].stack}")
+        self.print_game_state()
+
+def encode_card(card):
+    return CARD_VALUES[card.value] + 14 * SUIT_VALUES[card.suit]  # 14 возможных значений на каждую масть
+
+def encode_hand(hand):
+    return [encode_card(card) for card in hand]
+
+def encode_state(player_hand, community_cards, current_player_stack, opponent_stack, opponent_bet, pot, stage, win_rate, is_small_blind, starting_stack):
+    encoded_hand = encode_hand(player_hand)
+    encoded_community = encode_hand(community_cards)
+
+    # Нормализация стеков и ставок
+    stack_ratio = current_player_stack / starting_stack
+    opponent_stack_ratio = opponent_stack / starting_stack
+    opponent_bet_ratio = opponent_bet / starting_stack
+    pot_ratio = pot / starting_stack
+
+    # One-hot кодирование стадий игры
+    stage_encoding = [0] * 4  # Допустим, у нас 4 стадии: Preflop, Flop, Turn, River
+    stage_encoding[STAGE_ENCODING[stage]] = 1
+
+    # Нормализация вероятности выигрыша
+    win_rate_scaled = win_rate
+
+    # Информация о блайндах
+    blind_state = 1 if is_small_blind else 0
+
+    # Создание вектора состояния
+    state_vector = np.concatenate([
+        [stack_ratio, opponent_stack_ratio, opponent_bet_ratio, pot_ratio],
+        stage_encoding,
+        [win_rate_scaled, blind_state],
+        encoded_hand,
+        encoded_community
+    ])
+
+    return state_vector
+
+
+
+class QLearningAgent:
+    def __init__(self, game, num_states, num_actions=9, learning_rate=0.1, discount_factor=0.9, exploration_rate=1.0, exploration_decay_rate=0.9995):
+        self.game = game
+        self.num_states = num_states
+        self.num_actions = num_actions
+        self.learning_rate = learning_rate
+        self.discount_factor = discount_factor
+        # Учитываем размеры стеков игроков в размере Q-таблицы
+        self.q_table = np.zeros((num_states * num_states, num_actions))  # num_states for each player
+        self.state_index_mapping = {} 
+
+        self.average_reward = 0  # Среднее вознаграждение для отслеживания производительности
+        self.exploration_rate = 1.0  # Начальное значение ε
+        self.min_exploration_rate = 0.01  # Минимальное значение ε
+        self.exploration_decay_rate = 0.995  # Скорость уменьшения ε
+
+
+
+    def update_exploration_rate(self, last_episode_reward):
+        """Обновление exploration_rate на основе последнего вознаграждения."""
+        performance_threshold = 0.1  # Пороговое значение для изменения производительности
+        performance_change = last_episode_reward - self.average_reward
+        if performance_change < performance_threshold:
+            self.exploration_decay_rate *= 0.99  # Уменьшаем скорость уменьшения exploration_rate
+        
+        self.average_reward = last_episode_reward  # Обновляем среднее вознаграждение
+        self.exploration_rate = max(self.min_exploration_rate, self.exploration_rate * self.exploration_decay_rate)
+        print(f"Текущий exploration_rate: {self.exploration_rate}")
+
+    def get_state_index(self, state_vector):
+        # Преобразование вектора состояния в строку для использования в качестве ключа
+        state_key = ','.join(map(str, state_vector))
+        if state_key not in self.state_index_mapping:
+            self.state_index_mapping[state_key] = len(self.state_index_mapping)
+        return self.state_index_mapping[state_key]
+
+    def update_exploration_rate(self):
+        self.exploration_rate = max(self.min_exploration_rate, self.exploration_rate * self.exploration_decay_rate)
+        print(f"Updated exploration_rate: {self.exploration_rate}")
+
+    def choose_action(self, state_vector, available_actions_str):
+        state_index = self.get_state_index(state_vector)
+        available_actions_idx = self.convert_actions_to_indices(available_actions_str)
+        
+        if not available_actions_idx:
+            return self.game.ACTION_FOLD  # Возвращаем 'fold' как безопасное действие
+
+        if random.uniform(0, 1) < self.exploration_rate:
+            action = random.choice(available_actions_idx)  # Exploration
+        else:
+            q_values = self.get_q_values(state_index)
+            max_q_value = np.max(q_values[available_actions_idx])
+            best_actions = [action for action in available_actions_idx if q_values[action] == max_q_value]
+            action = random.choice(best_actions)  # Exploitation
+        
+        return action
+
+
+
+    def get_q_values(self, state_index):
+        """Получение Q-значений для всех действий в данном состоянии."""
+        return self.q_table[state_index]
+
+    def convert_actions_to_indices(self, available_actions_str):
+        action_mapping = {
+            'fold': self.game.ACTION_FOLD,
+            'call': self.game.ACTION_CALL,
+            'check': self.game.ACTION_CHECK,
+            'raise_5': self.game.ACTION_RAISE_5,
+            'raise_15': self.game.ACTION_RAISE_15,
+            'raise_35': self.game.ACTION_RAISE_35,
+            'raise_50': self.game.ACTION_RAISE_50,
+            'raise_75': self.game.ACTION_RAISE_75,
+            'raise_100': self.game.ACTION_RAISE_100
+            # Добавьте здесь остальные действия...
+        }
+        return [action_mapping[action_str] for action_str in available_actions_str if action_str in action_mapping]
+
+
+
+    def learn(self, state_vector, action, reward, next_state_vector):
+        state_index = self.get_state_index(state_vector)
+        next_state_index = self.get_state_index(next_state_vector)
+        predict = self.q_table[state_index, action]
+        target = reward + self.discount_factor * np.max(self.q_table[next_state_index])
+        self.q_table[state_index, action] += self.learning_rate * (target - predict)
+        print(f"Предсказание: {predict}, Цель: {target}, Обновленное Q-значение для действия {action}: {self.q_table[state_index, action]}")
+
+
+
+class UCBQLearningAgent:
+    def __init__(self, game, num_states, num_actions=9, learning_rate=0.1, discount_factor=0.9, exploration_rate=1.0, exploration_decay_rate=0.9995):
+        self.game = game
+        self.num_states = num_states
+        self.num_actions = num_actions
+        self.learning_rate = learning_rate
+        self.discount_factor = discount_factor
+        self.exploration_rate = exploration_rate
+        self.exploration_decay_rate = exploration_decay_rate
+        self.q_table = np.zeros((num_states * num_states, num_actions))  # num_states for each player
+        self.state_index_mapping = {}
+        self.min_exploration_rate = 0.05
+        self.exploration_decay_rate = exploration_decay_rate
+        self.total_rewards = np.zeros((num_states * num_states, num_actions))
+        self.total_selections = np.zeros((num_states * num_states, num_actions))
+        self.average_reward = 0
+        self.time_step = 0
+
+
+    def update_exploration_rate(self):
+        self.exploration_rate = max(self.min_exploration_rate, self.exploration_rate * self.exploration_decay_rate)
+        print(f"Текущий exploration_rate: {self.exploration_rate}")
+
+    def get_state_index(self, state_vector):
+        state_key = ','.join(map(str, state_vector))
+        if state_key not in self.state_index_mapping:
+            self.state_index_mapping[state_key] = len(self.state_index_mapping)
+        return self.state_index_mapping[state_key]
+
+    def choose_action(self, state_vector, available_actions_str):
+        state_index = self.get_state_index(state_vector)
+        available_actions_idx = self.convert_actions_to_indices(available_actions_str)
+
+        if not available_actions_idx:
+            return self.game.ACTION_FOLD  # Возвращаем 'fold' как безопасное действие
+
+        if len(available_actions_idx) == 1 or random.uniform(0, 1) < self.exploration_rate:
+            action = random.choice(available_actions_idx)  # Exploration или выбор единственного доступного действия
+        else:
+            ucb_values = [
+                self.q_table[state_index, action] + math.sqrt((2 * math.log(self.time_step + 1)) / (self.total_selections[state_index, action] + 1))
+                for action in available_actions_idx
+            ]
+            action = available_actions_idx[np.argmax(ucb_values)]  # Выбор действия с максимальным UCB
+
+        self.total_selections[state_index, action] += 1
+        self.time_step += 1
+        return action
+
+    def learn(self, state_vector, action, reward, next_state_vector):
+        state_index = self.get_state_index(state_vector)
+        next_state_index = self.get_state_index(next_state_vector)
+        predict = self.q_table[state_index, action]
+        target = reward + self.discount_factor * np.max(self.q_table[next_state_index])
+        self.q_table[state_index, action] += self.learning_rate * (target - predict)
+        self.total_rewards[state_index, action] += reward
+        self.total_selections[state_index, action] += 1  
+        print(f"Предсказание: {predict}, Цель: {target}, Обновленное Q-значение для действия {action}: {self.q_table[state_index, action]}")
+
+    def convert_actions_to_indices(self, available_actions_str):
+        action_mapping = {
+            'fold': self.game.ACTION_FOLD,
+            'call': self.game.ACTION_CALL,
+            'check': self.game.ACTION_CHECK,
+            'raise_5': self.game.ACTION_RAISE_5,
+            'raise_15': self.game.ACTION_RAISE_15,
+            'raise_35': self.game.ACTION_RAISE_35,
+            'raise_50': self.game.ACTION_RAISE_50,
+            'raise_75': self.game.ACTION_RAISE_75,
+            'raise_100': self.game.ACTION_RAISE_100
+        }
+        return [action_mapping[action_str] for action_str in available_actions_str if action_str in action_mapping]
+
+
+# Функция для запуска обучения агента
+# Функция для запуска обучения агента
+def train_agents(episodes, game, agents):
+    assert len(agents) == 2, "Должно быть два агента"
+    assert isinstance(agents[0], QLearningAgent) and isinstance(agents[1], UCBQLearningAgent), "Агенты должны быть разных типов"
+    
+    env = PokerEnv(game, agents)
+    
+    total_rewards = [0, 0]  
+    total_episodes = [0, 0]  
+    for episode in range(episodes):
+        states = env.reset()
+        done = False  
+        episode_rewards = [0, 0]  
+
+        while not done:
+            for i, agent in enumerate(agents):
+                current_player = game.players[i]
+                opponent = game.players[1 - i]
+                state_vector = encode_state(
+                    current_player.hand,
+                    game.community_cards,
+                    current_player.stack,
+                    opponent.stack,
+                    opponent.current_bet,
+                    game.pot,
+                    game.current_stage,
+                    game.estimate_win_rate(),
+                    game.is_player_small_blind(i),
+                    game.starting_stack
+                )
+                available_actions_str = game.get_available_actions(current_player)
+                action = agent.choose_action(state_vector, available_actions_str)
+                next_state, reward, done, _ = env.step(action)
+
+                total_rewards[i] += reward
+                episode_rewards[i] += reward
+
+                if not done:
+                    next_state_vector = encode_state(
+                        current_player.hand,
+                        game.community_cards,
+                        current_player.stack,
+                        opponent.stack,
+                        opponent.current_bet,
+                        game.pot,
+                        game.current_stage,
+                        game.estimate_win_rate(),
+                        game.is_player_small_blind(i),
+                        game.starting_stack
+                    )
+                    agent.learn(state_vector, action, reward, next_state_vector)
+                agent.update_exploration_rate()
+
+                if done or game.should_move_to_next_stage():
+                    break
+
+            if episode % 100 == 0:
+                print(f"Эпизод: {episode}, Вознаграждение: {episode_rewards}, Общее вознаграждение: {total_rewards}")
+
+        total_episodes[0] += 1
+        total_episodes[1] += 1
+
+        if episode % 100 == 0:
+            print(f"Статистика после {episode} эпизодов:")
+            for i, agent in enumerate(agents):
+                average_reward = total_rewards[i] / total_episodes[i]
+                print(f"Агент {i}: Среднее вознаграждение = {average_reward}")
+
+    return total_rewards
+
+# Инициализация игры и агентов
+game = PokerGame(starting_stack=25)
+agent1 = QLearningAgent(game, num_states=100, num_actions=9)
+agent2 = UCBQLearningAgent(game, num_states=100, num_actions=9)
+
+# Обучение агентов
+total_rewards = train_agents(1000, game, [agent1, agent2])
